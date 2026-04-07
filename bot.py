@@ -1,3 +1,4 @@
+import asyncio
 import html
 import logging
 import os
@@ -28,6 +29,8 @@ GENERATION_CONFIG = types.GenerateContentConfig(
     tools=[types.Tool(google_search=types.GoogleSearch())],
 )
 
+MAX_HISTORY_TURNS = 15  # keep last N user+model turn pairs
+
 CLEAR_BUTTON = "🗑 Clear conversation"
 REPLY_KEYBOARD = ReplyKeyboardMarkup([[CLEAR_BUTTON]], resize_keyboard=True)
 
@@ -42,6 +45,21 @@ def get_or_create_session(user_id: int) -> genai.chats.AsyncChat:
             config=GENERATION_CONFIG,
         )
     return chat_sessions[user_id]
+
+
+def maybe_trim_history(user_id: int) -> None:
+    """Recreate the session with only the most recent turns if history is too long."""
+    session = chat_sessions.get(user_id)
+    if session is None:
+        return
+    history = session.history
+    max_messages = MAX_HISTORY_TURNS * 2  # 1 turn = 1 user message + 1 model message
+    if len(history) > max_messages:
+        chat_sessions[user_id] = client.aio.chats.create(
+            model=GEMINI_MODEL,
+            config=GENERATION_CONFIG,
+            history=list(history[-max_messages:]),
+        )
 
 
 # Use a conservative limit to leave headroom for HTML tag expansion after md_to_html
@@ -129,17 +147,26 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def keep_typing(chat_id: int, context: ContextTypes.DEFAULT_TYPE, stop: asyncio.Event) -> None:
+    """Send typing action every 4 seconds until stop is set."""
+    while not stop.is_set():
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        await asyncio.sleep(4)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     user_text = update.message.text
 
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id, action=ChatAction.TYPING
+    stop_typing = asyncio.Event()
+    typing_task = asyncio.create_task(
+        keep_typing(update.effective_chat.id, context, stop_typing)
     )
 
     session = get_or_create_session(user_id)
     try:
         response = await session.send_message(user_text)
+        maybe_trim_history(user_id)
         reply_text = response.text
         if not reply_text or not reply_text.strip():
             await update.message.reply_text(
@@ -149,17 +176,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         chunks = split_message(reply_text)
         for i, chunk in enumerate(chunks):
-            await update.message.reply_text(
-                chunk,
-                parse_mode=ParseMode.HTML,
-                reply_markup=REPLY_KEYBOARD if i == len(chunks) - 1 else None,
-            )
+            is_last = i == len(chunks) - 1
+            try:
+                await update.message.reply_text(
+                    chunk,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=REPLY_KEYBOARD if is_last else None,
+                )
+            except Exception:
+                # HTML parse failed — fall back to plain text
+                plain = re.sub(r"<[^>]+>", "", chunk)
+                await update.message.reply_text(
+                    plain,
+                    reply_markup=REPLY_KEYBOARD if is_last else None,
+                )
     except Exception as e:
         logger.error("Gemini API error for user %s: %s", user_id, e)
         await update.message.reply_text(
             "Sorry, something went wrong while contacting Gemini. Please try again.",
             reply_markup=REPLY_KEYBOARD,
         )
+    finally:
+        stop_typing.set()
+        typing_task.cancel()
 
 
 def main() -> None:
