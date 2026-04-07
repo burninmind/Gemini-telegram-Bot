@@ -44,6 +44,36 @@ def get_or_create_session(user_id: int) -> genai.chats.AsyncChat:
     return chat_sessions[user_id]
 
 
+# Use a conservative limit to leave headroom for HTML tag expansion after md_to_html
+MAX_MESSAGE_LENGTH = 3800
+
+
+def split_message(text: str) -> list[str]:
+    """Split raw text into chunks under Telegram's 4096-char limit, then convert each to HTML."""
+    if len(text) <= MAX_MESSAGE_LENGTH:
+        return [md_to_html(text)]
+
+    chunks = []
+    while len(text) > MAX_MESSAGE_LENGTH:
+        # Prefer splitting at a paragraph break, line break, sentence end, then hard-cut
+        split_at = text.rfind("\n\n", 0, MAX_MESSAGE_LENGTH)
+        if split_at == -1:
+            split_at = text.rfind("\n", 0, MAX_MESSAGE_LENGTH)
+        if split_at == -1:
+            split_at = text.rfind(". ", 0, MAX_MESSAGE_LENGTH)
+            if split_at != -1:
+                split_at += 1  # include the period in the current chunk
+        if split_at == -1:
+            split_at = MAX_MESSAGE_LENGTH
+        chunks.append(md_to_html(text[:split_at].strip()))
+        text = text[split_at:].strip()
+
+    if text:
+        chunks.append(md_to_html(text))
+
+    return chunks
+
+
 def md_to_html(text: str) -> str:
     """Convert Gemini markdown output to Telegram HTML."""
     code_blocks: list[str] = []
@@ -110,9 +140,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     session = get_or_create_session(user_id)
     try:
         response = await session.send_message(user_text)
-        await update.message.reply_text(
-            md_to_html(response.text), parse_mode=ParseMode.HTML, reply_markup=REPLY_KEYBOARD
-        )
+        reply_text = response.text
+        if not reply_text or not reply_text.strip():
+            await update.message.reply_text(
+                "Gemini returned an empty response. This may be due to a content safety filter.",
+                reply_markup=REPLY_KEYBOARD,
+            )
+            return
+        chunks = split_message(reply_text)
+        for i, chunk in enumerate(chunks):
+            await update.message.reply_text(
+                chunk,
+                parse_mode=ParseMode.HTML,
+                reply_markup=REPLY_KEYBOARD if i == len(chunks) - 1 else None,
+            )
     except Exception as e:
         logger.error("Gemini API error for user %s: %s", user_id, e)
         await update.message.reply_text(
