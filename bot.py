@@ -30,6 +30,8 @@ GENERATION_CONFIG = types.GenerateContentConfig(
 )
 
 MAX_HISTORY_TURNS = 15  # keep last N user+model turn pairs
+MAX_RETRIES = 5
+RETRYABLE_ERRORS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")
 
 CLEAR_BUTTON = "🗑 Clear conversation"
 REPLY_KEYBOARD = ReplyKeyboardMarkup([[CLEAR_BUTTON]], resize_keyboard=True)
@@ -147,6 +149,21 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def send_with_retry(session: genai.chats.AsyncChat, text: str):
+    """Send a message with exponential backoff on transient API errors."""
+    delay = 2
+    for attempt in range(MAX_RETRIES):
+        try:
+            return await session.send_message(text)
+        except Exception as e:
+            is_retryable = any(code in str(e) for code in RETRYABLE_ERRORS)
+            if not is_retryable or attempt == MAX_RETRIES - 1:
+                raise
+            logger.warning("Transient API error (attempt %d/%d): %s", attempt + 1, MAX_RETRIES, e)
+            await asyncio.sleep(delay)
+            delay *= 2
+
+
 async def keep_typing(chat_id: int, context: ContextTypes.DEFAULT_TYPE, stop: asyncio.Event) -> None:
     """Send typing action every 4 seconds until stop is set."""
     while not stop.is_set():
@@ -165,7 +182,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     session = get_or_create_session(user_id)
     try:
-        response = await session.send_message(user_text)
+        response = await send_with_retry(session, user_text)
         maybe_trim_history(user_id)
         reply_text = response.text
         if not reply_text or not reply_text.strip():
