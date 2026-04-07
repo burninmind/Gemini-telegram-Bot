@@ -64,7 +64,7 @@ A Telegram bot that lets you have multi-turn text conversations with Google Gemi
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Your Telegram bot token | required |
 | `GEMINI_API_KEY` | Your Google Gemini API key | required |
-| `GEMINI_MODEL` | Gemini model to use | `gemini-2.0-flash` |
+| `GEMINI_MODEL` | Gemini model to use | `gemini-2.5-flash` |
 
 ## Notes
 
