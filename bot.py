@@ -52,7 +52,7 @@ def maybe_trim_history(user_id: int) -> None:
     session = chat_sessions.get(user_id)
     if session is None:
         return
-    history = session.history
+    history = getattr(session, 'history', None) or session._curated_history
     max_messages = MAX_HISTORY_TURNS * 2  # 1 turn = 1 user message + 1 model message
     if len(history) > max_messages:
         chat_sessions[user_id] = client.aio.chats.create(
